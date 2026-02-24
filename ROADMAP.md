@@ -84,41 +84,44 @@
 ---
 
 ## Phase 4 — Egg Man
-> Bootstrap the Afana compiler project: establish the build system, define the internal IR data structures, wire CBOR input through the parser to a stub output, and emit the first (trivially incorrect but structurally valid) QASM3 file.
+> Bootstrap the Afana compiler project: build system, internal IR, a basic type checker that runs before any lowering, and a stub QASM3 emitter — so that from the first line of compiled output, every program has been type-checked.
 
 **What gets built**
-- `afana/Cargo.toml` — workspace manifest with crates: `afana-parser`, `afana-ir`, `afana-backend`, `afana-cli`
+- `afana/Cargo.toml` — workspace manifest with crates: `afana-parser`, `afana-ir`, `afana-typeck`, `afana-backend`, `afana-cli`
 - `afana/src/ir/mod.rs` — internal IR definition: `IrProgram`, `IrHamiltonian`, `IrTerm`, `IrQubitRef` — a flattened, index-based representation of the Ehrenfest parse tree, independent of CBOR encoding
-- `afana/src/lowering/ehrenfest_to_ir.rs` — lowering pass: `EhrenfestProgram` → `IrProgram`; resolves parameter references, expands tensor products, normalizes all terms to Pauli-sum form
-- `afana/src/backend/qasm3_stub.rs` — stub QASM3 emitter: for each qubit referenced in `IrProgram`, emits `qubit[n] q; h q[0]; // stub` and closes with `OPENQASM 3.0;` header — structurally valid QASM3, semantically meaningless
-- `afana/src/cli/main.rs` — CLI entry point: `afana compile <input.ehrenfest> --backend qasm3 --output <out.qasm>`
-- `afana/tests/integration/stub_compile.rs` — integration test: compile each Phase 1 and 2 example, assert output file exists, assert it begins with `OPENQASM 3.0;`, assert qubit count matches system size in Ehrenfest source
+- `afana/src/typeck/mod.rs` — basic type checker entry point, invoked after parsing and **before** lowering; rejects programs that cannot be lowered to a well-formed IR
+- `afana/src/typeck/qubit_env.rs` — qubit environment: tracks qubit identifiers, validates system dimension consistency, detects dimension mismatches between operators and declared system size
+- `afana/src/typeck/errors.rs` — typed error enum: `DimensionMismatch`, `UnknownQubit`, `MalformedTerm`; all errors carry source location from the parse tree
+- `afana/src/lowering/ehrenfest_to_ir.rs` — lowering pass: `EhrenfestProgram` → `IrProgram`; only reachable after type check passes
+- `afana/src/backend/qasm3_stub.rs` — stub QASM3 emitter: emits structurally valid QASM3 with correct qubit count; semantically meaningless, explicitly marked `// stub`
+- `afana/src/cli/main.rs` — CLI entry point: `afana compile <input.ehrenfest> --backend qasm3 --output <out.qasm>`; pipeline order is parse → type-check → lower → emit
+- `afana/tests/integration/stub_compile.rs` — integration test: compile each Phase 1 and 2 example through the full pipeline, assert output exists and qubit count matches source
 
 **Success criteria**
 - `cargo build --release` produces a working `afana` binary
-- `afana compile examples/heisenberg.ehrenfest --backend qasm3 --output out.qasm` exits 0 and writes a file
-- Output file begins with `OPENQASM 3.0;` and declares the correct number of qubits for each example
-- `cargo test` passes for all unit tests in `afana-parser` and `afana-ir`
-- Integration test suite (5 examples) passes: all produce structurally valid QASM3
+- Pipeline order is enforced: lowering is unreachable without a passing type check; the CLI exits with a type error before emitting any output if type checking fails
+- A program with a two-qubit operator applied to a one-qubit system is rejected at type-check time with `DimensionMismatch`; test asserts the error variant
+- All five Phase 1 and 2 example programs pass the type checker without errors
 - `IrProgram` for H2 VQE example contains exactly the number of Pauli terms present in the Ehrenfest source
+- `cargo test` passes for all unit tests in `afana-parser`, `afana-ir`, and `afana-typeck`
 
 **Dependencies**
-- Phase 3 (Johnny Ryall): the parser and `EhrenfestProgram` AST are the input to the lowering pass
+- Phase 3 (Johnny Ryall): the parser and `EhrenfestProgram` AST are the input to both the type checker and the lowering pass
 
 **Scope:** Medium
 
 ---
 
 ## Phase 5 — High Plains Drifter
-> Define the ZX-IR intermediate representation and implement the Ehrenfest-to-ZX-IR lowering pass, replacing the stub IR with a graph-based structure that encodes quantum semantics as ZX-calculus spiders and wires.
+> Define the complete ZX-IR data structures and implement the Ehrenfest-to-ZX-IR lowering pass. This phase owns the graph representation; all subsequent phases import from it.
 
 **What gets built**
 - `afana/src/zxir/mod.rs` — ZX-IR graph definition: `ZxGraph` as adjacency list of `ZxNode` (Z-spider, X-spider, H-box, input boundary, output boundary) and `ZxEdge` (regular wire, Hadamard edge); nodes carry phases as exact rational multiples of π stored as `(numerator: i64, denominator: u64)`
 - `afana/src/zxir/phase.rs` — phase arithmetic: addition mod 2π, negation, scalar multiplication — exact rational arithmetic, no floating point
-- `afana/src/lowering/ir_to_zxir.rs` — lowering pass: `IrProgram` → `ZxGraph`; maps each Pauli term in the Hamiltonian to a ZX gadget
 - `afana/src/zxir/validation.rs` — structural validator: checks that every boundary has exactly one wire, no dangling edges, phase values in [0, 2π)
+- `afana/src/lowering/ir_to_zxir.rs` — lowering pass: `IrProgram` → `ZxGraph`; maps each Pauli term in the Hamiltonian to a ZX gadget
 - `afana/tests/zxir/` — test suite: unit tests for lowering of single Pauli terms (X, Y, Z, ZZ, ZZZ), plus full-program tests for all five Ehrenfest examples
-- `spec/ZXIR.md` — specification of the ZX-IR format: node types, edge types, phase encoding, and mapping rules from Ehrenfest Hamiltonian terms to ZX gadgets
+- `spec/ZXIR.md` — authoritative specification of the ZX-IR format: node types, edge types, phase encoding, mapping rules from Ehrenfest Hamiltonian terms to ZX gadgets, and (with Phase 6) rewrite axioms; this is the single source of truth — no parallel ZX spec document exists elsewhere in the repo
 
 **Success criteria**
 - `IrProgram` for a single-qubit Z Hamiltonian (H = Z) lowers to a ZX graph with exactly one Z-spider with phase π
@@ -126,7 +129,7 @@
 - `zxir::validation::validate` returns `Ok` for all graphs produced from Phase 1 and 2 examples
 - Phase arithmetic is exact: `π/2 + π/2 = π` represented as `(1,2) + (1,2) = (1,1)` with no floating-point intermediate
 - `cargo test afana::zxir` passes with zero failures
-- `spec/ZXIR.md` is complete enough that an independent implementer could write a conformant lowering pass from it alone
+- `spec/ZXIR.md` is complete enough that an independent implementer could write a conformant lowering pass from it alone, without reading source code
 
 **Dependencies**
 - Phase 4 (Egg Man): `IrProgram` and the Afana build system must exist
@@ -136,15 +139,13 @@
 ---
 
 ## Phase 6 — The Sounds of Science
-> ZX-calculus rewriting rules are implemented in Afana, enabling graph-based simplification before gate synthesis.
+> ZX-calculus rewriting rules are implemented in Afana, operating on the `zxir::` graph types defined in Phase 5. This phase adds algorithms only — no new graph data structures.
 
 **What gets built**
-- `afana/src/zx/rewrite.rs` — rewriting engine with spider fusion, identity removal, and Hadamard cancellation rules
-- `afana/src/zx/spider.rs` — Z-spider and X-spider node types with phase labels
-- `afana/src/zx/graph.rs` — ZX-diagram as a multigraph
-- `spec/zx-ir-v0.1.md` — formal definition of ZX-IR node types, wire types, and rewrite axioms
-- `tests/zx/` — unit test suite covering each rewrite rule with before/after diagram assertions
+- `afana/src/zxir/rewrite.rs` — rewriting engine operating on `ZxGraph` from `zxir::mod`; implements spider fusion, identity removal, and Hadamard cancellation; imports node and edge types from Phase 5, does not redefine them
+- `tests/zx/` — unit test suite covering each rewrite rule with before/after diagram assertions expressed in terms of `ZxGraph` node and edge counts
 - `benches/zx_rewrite.rs` — benchmark measuring rewrite pass wall time on Heisenberg, Rabi, and Ising examples
+- `spec/ZXIR.md` (amended) — rewrite axioms section appended to the Phase 5 spec document; no new spec file created
 
 **Success criteria**
 - Spider fusion: two adjacent same-color spiders merge into one; test asserts node count reduction
@@ -153,9 +154,10 @@
 - All three Phase 1 examples pass through the rewrite engine without panic
 - Rewrite pass terminates on all test inputs (step counter with hard cap)
 - Benchmark baseline recorded in `benches/baseline-zx.txt` for CI regression tracking
+- No `spider.rs` or `graph.rs` files exist under `afana/src/zx/`; all graph types are imported from `afana::zxir`
 
 **Dependencies**
-- Phase 5 (High Plains Drifter): ZX-IR definition and Ehrenfest → ZX-IR lowering must be complete
+- Phase 5 (High Plains Drifter): `ZxGraph`, `ZxNode`, `ZxEdge`, and phase arithmetic must be defined and stable; this phase adds no new graph data structures
 
 **Scope:** Medium
 
@@ -188,28 +190,27 @@
 ---
 
 ## Phase 8 — Hey Ladies
-> Afana gains a type checker that tracks qubit identity and entanglement through the full Ehrenfest → QASM3 pipeline.
+> The type checker gains physics-aware entanglement tracking: qubit state flows through the type system across two-qubit operators, and the type checker enforces the no-cloning constraint.
 
 **What gets built**
-- `afana/src/typeck/mod.rs` — type checker entry point, invoked after parsing and before lowering
-- `afana/src/typeck/qubit_env.rs` — qubit environment: maps Ehrenfest qubit identifiers to type states (fresh, entangled, measured, discarded)
-- `afana/src/typeck/entanglement.rs` — entanglement type lattice: `Separable`, `Entangled(set)`, `Mixed`; propagated through two-qubit operators
-- `afana/src/typeck/errors.rs` — typed error enum: use-after-measure, double-discard, entanglement violation, dimension mismatch
-- `spec/type-system-v0.1.md` — specification of the qubit type system, the entanglement lattice, and the error taxonomy
-- `tests/typeck/` — test suite with valid and invalid Ehrenfest programs; invalid programs must produce the expected typed error
+- `afana/src/typeck/qubit_env.rs` (extended) — qubit type states expanded from Phase 4's `{fresh, error}` to `{fresh, separable, entangled(set), measured, discarded}`; state transitions driven by operator types in the IR
+- `afana/src/typeck/entanglement.rs` — entanglement type lattice: `Separable`, `Entangled(set)`, `Mixed`; propagated through two-qubit operators; join operation for merging entanglement sets at control-flow merge points
+- `afana/src/typeck/errors.rs` (extended) — new error variants: `UseAfterMeasure`, `DoubleDiscard`, `EntanglementViolation`; these require entanglement state to be meaningful and cannot be detected with Phase 4's basic type system alone
+- `spec/type-system-v0.1.md` — full specification of the qubit type system: the state machine for qubit types, the entanglement lattice, transition rules for every operator class, and the complete error taxonomy
+- `tests/typeck/` — test suite extended with entanglement cases: valid and invalid programs; invalid programs must produce the expected typed error variant
 
 **Success criteria**
-- A program that applies a unitary to a qubit after measuring it is rejected with a `use-after-measure` error
-- A two-qubit program applying CNOT is assigned `Entangled({q0, q1})` type after the gate
-- A program with mismatched Hilbert space dimensions is rejected with a `dimension_mismatch` error
-- All three Phase 1 example programs pass the type checker without errors
-- Type checker adds less than 50 ms to end-to-end compilation time for all existing examples
+- A program that applies a unitary to a qubit after measuring it is rejected with `UseAfterMeasure`; test asserts the error variant and the source location
+- A two-qubit program applying a controlled operation is assigned `Entangled({q0, q1})` after the gate; test asserts the entanglement set
+- A program that discards a qubit and then references it is rejected with `DoubleDiscard`
+- All Phase 1 and 2 example programs pass the extended type checker without errors
+- The entanglement extension adds less than 20 ms to end-to-end compilation time versus Phase 4 baseline
 
 **Dependencies**
-- Phase 3 (Johnny Ryall): parse tree and CBOR deserializer are the type checker's input
-- Phase 7 (3-Minute Rule): end-to-end pipeline must exist for type checker integration
+- Phase 4 (Egg Man): the basic type checker (`typeck::mod`, `typeck::qubit_env`, `typeck::errors`) must exist; this phase extends it, does not replace it
+- Phase 7 (3-Minute Rule): end-to-end pipeline must be established so the extended type checker can be integrated and its performance impact measured
 
-**Scope:** Large
+**Scope:** Medium
 
 ---
 
