@@ -268,7 +268,15 @@ def parse_contributor(as_str: str) -> dict:
 
 
 def task_id_completer(**kwargs):
-    """Returns list of task IDs from the default board."""
+    """
+    Return a list of task IDs from the default board.
+
+    Args:
+        **kwargs: Additional keyword arguments (unused).
+
+    Returns:
+        list: A list of task IDs as strings.
+    """
     try:
         board_url = DEFAULT_BOARD
         outbox = get(f"{board_url}{OUTBOX_PATH}")
